@@ -1,0 +1,52 @@
+name: Build MarkVault APK
+
+on:
+  push:
+    paths:
+      - "source.zip"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Unzip project
+        run: unzip -o -q source.zip -d project
+
+      - name: Build APK
+        run: cd project && gradle assembleRelease --no-daemon
+
+      - name: Collect APK
+        run: cp project/app/build/outputs/apk/release/app-release.apk MarkVault.apk
+
+      - name: Upload APK (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarkVault-APK
+          path: MarkVault.apk
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "MarkVault — latest APK"
+          body: "Fresh MarkVault build. Download MarkVault.apk below and install it."
+          files: MarkVault.apk
