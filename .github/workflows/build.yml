@@ -1,27 +1,20 @@
-name: Build MarkVault APK
+name: Validate MarkVault 5.5.19
 
 on:
   push:
     paths:
-      - "source.zip"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Get the code
+      - name: Get validation branch
         uses: actions/checkout@v4
-
-      - name: Export source archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: MarkVault-source-5.5.18
-          path: source.zip
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -34,25 +27,33 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Unzip project
+      - name: Unzip exact passed 5.5.18 baseline
         run: unzip -o -q source.zip -d project
 
-      - name: Build APK
+      - name: Apply exact local 5.5.19 patch
+        run: |
+          cat validation/patch_part_1.diff validation/patch_part_2.diff validation/patch_part_3.diff validation/patch_part_4.diff > change.patch
+          cd project
+          patch -p1 --fuzz=0 < ../change.patch
+
+      - name: Verify patched files match local source exactly
+        run: |
+          cd project
+          echo "1d824adeafb5eef5c0e986250b20218fa2cd9ac5d163266d5249727e8d391159  app/build.gradle.kts" | sha256sum -c -
+          echo "5cbd1da92bd38fba84a492f20b694a721f62f133b51083e0a1260bf668b06369  app/src/main/java/com/tebogo/markvault/ui/ArticleHighlightNavigation.kt" | sha256sum -c -
+          echo "3151dd3b794bf02dbeb523d8bae695b7673e70622c88b1a12e609ee08723843d  app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt" | sha256sum -c -
+          echo "5a998026cc2f6afb4e25591952f9e028f9ee424bd6540b97a5c5dce7e5e9886b  app/src/main/java/com/tebogo/markvault/ui/ReaderScreen.kt" | sha256sum -c -
+
+      - name: Verify protected 5.5.18 accuracy and renderer files unchanged
+        run: |
+          cd project
+          echo "a60698b2e54fb5fd4e12aed2dd8a285025abb8c64b098e5edfc1707ce99d8880  app/src/main/assets/render.js" | sha256sum -c -
+          echo "c4bf8ae6ea7c0eca6696e17a825fc8d6c28268f4d3b22861ff69b88ff1e9af97  app/src/main/java/com/tebogo/markvault/AppViewModel.kt" | sha256sum -c -
+          echo "882b515a9eb00d7f709bb625af32369b88f5164867724d67d097a7644d4f1fe8  app/src/main/java/com/tebogo/markvault/search/AnnIndex.kt" | sha256sum -c -
+          echo "fbf4a0f5214033dde3e38ab46129e2244b4c587bc2d3ce55b68e4ef6730b076f  app/src/main/java/com/tebogo/markvault/search/EmbeddingService.kt" | sha256sum -c -
+          echo "086049590cdcdd22dba7e8b5350643c2d3567f260a2555d16595f444685d83d5  app/src/main/java/com/tebogo/markvault/data/Db.kt" | sha256sum -c -
+          echo "e46a0e4b449149b023cda7ed94bd82f6ade236076b2d737210e9ecf9f8a43bc4  app/src/main/java/com/tebogo/markvault/search/QuestionAwareness.kt" | sha256sum -c -
+          echo "7623c3805ef27426a550c9ba2507aa2d5b150e0af8767631c0d7768a4b196068  app/src/main/java/com/tebogo/markvault/search/SavedSearchStore.kt" | sha256sum -c -
+
+      - name: Build release APK
         run: cd project && gradle assembleRelease --no-daemon
-
-      - name: Collect APK
-        run: cp project/app/build/outputs/apk/release/app-release.apk MarkVault.apk
-
-      - name: Upload APK (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: MarkVault-APK
-          path: MarkVault.apk
-
-      - name: Publish APK to Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "MarkVault — latest APK"
-          body: "Fresh MarkVault build. Download MarkVault.apk below and install it."
-          files: MarkVault.apk
