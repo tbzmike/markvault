@@ -1,0 +1,243 @@
+diff -ruN mv_5518/app/src/main/java/com/tebogo/markvault/ui/ReaderScreen.kt mv_5519/app/src/main/java/com/tebogo/markvault/ui/ReaderScreen.kt
+--- mv_5518/app/src/main/java/com/tebogo/markvault/ui/ReaderScreen.kt	2026-09-26 01:35:33.000000000 +0000
++++ mv_5519/app/src/main/java/com/tebogo/markvault/ui/ReaderScreen.kt	2026-09-26 03:19:40.301079318 +0000
+@@ -185,6 +185,13 @@
+     var highlightSnippet by remember { mutableStateOf("") }
+     /** v5.4.76cc — LLM-produced paraphrase terms for softer lavender overlay. */
+     var highlightLlmTerms by remember { mutableStateOf<List<String>>(emptyList()) }
++    // v5.5.19 — Search-result highlighting has an explicit lifecycle in the
++    // reader UI. The loading chip is shown while Smart/Semantic work is still
++    // resolving, and the navigation arrows appear only after the DOM contains
++    // real primary highlight targets. Keying by active tab prevents a late
++    // callback from visually leaking the previous article's state.
++    var highlightLoading by remember(activeTab) { mutableStateOf(false) }
++    var highlightMatchCount by remember(activeTab) { mutableIntStateOf(0) }
+     /** v5.4.307cc — One-shot query from SearchResultActionSheet. Kept locally
+      * until the WebView has rendered and the yellow term-hit marks exist. */
+     var pendingAutoPopupQuery by remember { mutableStateOf<String?>(null) }
+@@ -212,11 +219,15 @@
+             highlightIsPhrase = pending.isPhrase
+             highlightSnippet = pending.snippet
+             highlightLlmTerms = pending.llmTerms
++            highlightLoading = true
++            highlightMatchCount = 0
+         } else {
+             highlightTerm = null
+             highlightIsPhrase = false
+             highlightSnippet = ""
+             highlightLlmTerms = emptyList()
++            highlightLoading = false
++            highlightMatchCount = 0
+         }
+         // Refresh the connection count for this tab
+         connCount = if (id != null) vm.connectionCount(id) else -1
+@@ -224,6 +235,17 @@
+ 
+     var webView by remember { mutableStateOf<WebView?>(null) }
+ 
++    fun syncMarkdownHighlightUi(view: WebView, expectedNoteId: Long) {
++        view.evaluateJavascript(
++            articleHighlightCountJs(MARKDOWN_PRIMARY_HIGHLIGHT_SELECTOR)
++        ) { rawCount ->
++            if (activeTab == expectedNoteId) {
++                highlightMatchCount = parseJavascriptInt(rawCount).coerceAtLeast(0)
++                highlightLoading = false
++            }
++        }
++    }
++
+     // v5.4.356cc — Workspace Inspector outline items navigate the live Markdown
+     // WebView. render.js assigns headings in the same document order used by
+     // AppViewModel.parseOutline(), so the inspector index maps directly to the
+@@ -468,6 +490,14 @@
+                 pendingAutoPopupQuery = null
+                 vm.findAndShowArticlePassages(n.id, n.content, autoQ)
+             }
++            // HTML-dominant .md documents bypass viewer.html and therefore do
++            // not expose the Markdown highlighter DOM contract. Never leave the
++            // v5.5.19 loading indicator spinning indefinitely on this legacy
++            // branch; its existing raw-HTML behaviour remains unchanged.
++            if (!term.isNullOrBlank()) {
++                highlightLoading = false
++                highlightMatchCount = 0
++            }
+             return@LaunchedEffect
+         }
+ 
+@@ -531,6 +561,9 @@
+                         }
+                     }
+                 }
++                // Keyword mode is complete in this transaction. Smart +
++                // Semantic deliberately waits for its semantic owner below.
++                if (!semanticPrimary) syncMarkdownHighlightUi(wv, n.id)
+             }
+             // v5.5.16 — Correct Auto/Smart wiring. In semantic mode the old
+             // v5.5.6 fallback ran only when *zero* lexical marks existed. A single
+@@ -539,40 +572,70 @@
+             // Smart and semantic search is ON, always compute semantic passages;
+             // replace lexical marks only if a semantic sentence was found. Keyword
+             // mode never runs this pass. Search ranking/scoring is untouched.
+-            if (hlMode == "smart" && vm.semanticEnabled.value) {
++            if (semanticPrimary) {
+                 val semanticFallbackQuery = term
+                 val semanticFallbackText = n.content
+                 wv.postDelayed({
+-                    if (activeTab == n.id && vm.articleHighlightEnabled.value &&
+-                        vm.effectiveHighlightMode() == "smart" && vm.semanticEnabled.value) {
+-                        relatedScope.launch {
+-                            val passages = vm.findArticleSemanticHighlightSentences(
++                    if (activeTab != n.id) return@postDelayed
++
++                    // If the user changes highlighting settings while the
++                    // semantic pass is waiting, finish deterministically instead
++                    // of leaving the loading chip stranded.
++                    if (!vm.articleHighlightEnabled.value) {
++                        highlightLoading = false
++                        highlightMatchCount = 0
++                        return@postDelayed
++                    }
++                    if (vm.effectiveHighlightMode() != "smart" || !vm.semanticEnabled.value) {
++                        val fallbackMode = vm.effectiveHighlightMode()
++                        wv.evaluateJavascript(
++                            "highlightTerm(${jsString(term)}, ${jsString(fallbackMode)}, $phraseFlag, ${jsString(highlightSnippet)});$llmJs"
++                        ) { syncMarkdownHighlightUi(wv, n.id) }
++                        return@postDelayed
++                    }
++
++                    relatedScope.launch {
++                        val passages = runCatching {
++                            vm.findArticleSemanticHighlightSentences(
+                                 semanticFallbackText, semanticFallbackQuery
+                             )
+-                            if (passages.isNotEmpty() && activeTab == n.id &&
+-                                vm.effectiveHighlightMode() == "smart") {
+-                                wv.evaluateJavascript(
+-                                    "highlightSemanticPassages(${org.json.JSONArray(passages).toString()});"
+-                                ) { applied ->
+-                                    // If a semantic sentence could not be mapped back to
+-                                    // the rendered DOM, restore the already-supported lexical
+-                                    // highlight rather than leaving the article unhighlighted.
+-                                    if (applied != "true" && activeTab == n.id &&
+-                                        vm.effectiveHighlightMode() == "smart") {
++                        }.getOrDefault(emptyList())
++
++                        if (activeTab != n.id) return@launch
++                        if (!vm.articleHighlightEnabled.value) {
++                            highlightLoading = false
++                            highlightMatchCount = 0
++                            return@launch
++                        }
++
++                        if (passages.isNotEmpty() &&
++                            vm.effectiveHighlightMode() == "smart" &&
++                            vm.semanticEnabled.value) {
++                            wv.evaluateJavascript(
++                                "highlightSemanticPassages(${org.json.JSONArray(passages).toString()});"
++                            ) { applied ->
++                                if (activeTab == n.id) {
++                                    // v5.5.18 transactional handoff remains intact:
++                                    // semantic mapping must succeed before it can
++                                    // replace the primary highlight.
++                                    if (applied == "true") {
++                                        syncMarkdownHighlightUi(wv, n.id)
++                                    } else {
++                                        val fallbackMode = vm.effectiveHighlightMode()
+                                         wv.evaluateJavascript(
+-                                            "highlightTerm(${jsString(term)}, ${jsString(hlMode)}, $phraseFlag, ${jsString(highlightSnippet)});$llmJs",
+-                                            null
+-                                        )
++                                            "highlightTerm(${jsString(term)}, ${jsString(fallbackMode)}, $phraseFlag, ${jsString(highlightSnippet)});$llmJs"
++                                        ) { syncMarkdownHighlightUi(wv, n.id) }
+                                     }
+                                 }
+-                            } else if (activeTab == n.id && vm.effectiveHighlightMode() == "smart") {
+-                                // v5.5.18 — Semantic computation itself produced no
+-                                // usable passage. Only now fall back to lexical highlighting.
+-                                wv.evaluateJavascript(
+-                                    "highlightTerm(${jsString(term)}, ${jsString(hlMode)}, $phraseFlag, ${jsString(highlightSnippet)});$llmJs",
+-                                    null
+-                                )
+                             }
++                        } else {
++                            // Semantic computation produced no usable passage (or
++                            // semantic mode was switched off while it ran). Keep
++                            // the guaranteed lexical fallback from v5.5.18.
++                            val fallbackMode = vm.effectiveHighlightMode()
++                            wv.evaluateJavascript(
++                                "highlightTerm(${jsString(term)}, ${jsString(fallbackMode)}, $phraseFlag, ${jsString(highlightSnippet)});$llmJs"
++                            ) { syncMarkdownHighlightUi(wv, n.id) }
+                         }
+                     }
+                 }, 80L)
+@@ -1679,25 +1742,55 @@
+                     }
+                 )
+ 
+-                // v5.4.181cc — "Jump to top" for long articles. Reuses the
+-                // existing webView reference and latestScroll tracking
+-                // (both already set up for the v5.4.156cc scroll-to-hide
+-                // toolbar work) — no new capture logic needed. scrollTo(0,0)
+-                // is the plain View method (guaranteed public on WebView,
+-                // unlike smoothScrollTo which isn't reliably public), so
+-                // this is an instant jump rather than an animated one.
+-                // Positioned bottom-start to avoid the Scaffold FAB slot
+-                // (bottom-end) and the edge-swipe zones (center-start/end).
+-                if (latestScroll.value > 400) {
+-                    AnimatedJumpToTop(
+-                        onClick = { webView?.scrollTo(0, 0) },
++                // v5.5.19 — Make the asynchronous highlight lifecycle visible.
++                // This chip is scoped to search-result opens only and is cleared
++                // by the same callback that confirms real DOM highlight targets.
++                if (highlightLoading) {
++                    ArticleHighlightLoadingIndicator(
+                         modifier = Modifier
+-                            .align(Alignment.BottomCenter)
+-                            // Clear the article bottom toolbar/floating actions.
+-                            .padding(bottom = 82.dp)
++                            .align(Alignment.TopCenter)
++                            .padding(top = 10.dp)
+                     )
+                 }
+ 
++                // v5.5.19 — Keep highlight navigation directly BELOW the existing
++                // animated finger, as requested. When the article is already near
++                // the top the finger is absent and the arrows occupy the same safe
++                // bottom-center area above the reader toolbar.
++                if (latestScroll.value > 400 || (!highlightLoading && highlightMatchCount > 0)) {
++                    Column(
++                        modifier = Modifier
++                            .align(Alignment.BottomCenter)
++                            .padding(bottom = 82.dp),
++                        horizontalAlignment = Alignment.CenterHorizontally
++                    ) {
++                        if (latestScroll.value > 400) {
++                            AnimatedJumpToTop(
++                                onClick = { webView?.scrollTo(0, 0) }
++                            )
++                        }
++                        if (!highlightLoading && highlightMatchCount > 0) {
++                            if (latestScroll.value > 400) Spacer(Modifier.height(6.dp))
++                            ArticleHighlightNavigationControls(
++                                onPrevious = {
++                                    webView?.evaluateJavascript(
++                                        articleHighlightJumpJs(
++                                            MARKDOWN_PRIMARY_HIGHLIGHT_SELECTOR, -1
++                                        ), null
++                                    )
++                                },
++                                onNext = {
++                                    webView?.evaluateJavascript(
++                                        articleHighlightJumpJs(
++                                            MARKDOWN_PRIMARY_HIGHLIGHT_SELECTOR, 1
++                                        ), null
++                                    )
++                                }
++                            )
++                        }
++                    }
++                }
++
+                 // Edge-swipe zones for tab switching. These are narrow (28dp) overlays at
+                 // the very left and right edges. The vast majority of the screen has zero
+                 // pointer interception — scrolling stays buttery smooth — while users still
