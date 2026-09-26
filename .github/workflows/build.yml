@@ -17,6 +17,12 @@ jobs:
       - name: Get the code
         uses: actions/checkout@v4
 
+      - name: Export source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarkVault-source-5.5.18
+          path: source.zip
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
