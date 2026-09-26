@@ -1,0 +1,183 @@
+diff -ruN mv_5518/app/src/main/java/com/tebogo/markvault/ui/ArticleHighlightNavigation.kt mv_5519/app/src/main/java/com/tebogo/markvault/ui/ArticleHighlightNavigation.kt
+--- mv_5518/app/src/main/java/com/tebogo/markvault/ui/ArticleHighlightNavigation.kt	1970-01-01 00:00:00.000000000 +0000
++++ mv_5519/app/src/main/java/com/tebogo/markvault/ui/ArticleHighlightNavigation.kt	2026-09-26 03:18:10.605733738 +0000
+@@ -0,0 +1,179 @@
++package com.tebogo.markvault.ui
++
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.KeyboardArrowDown
++import androidx.compose.material.icons.filled.KeyboardArrowUp
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Surface
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++
++/**
++ * v5.5.19 — Shared article-highlight UI and DOM navigation helpers.
++ *
++ * Both Markdown and offline-HTML readers use these helpers so the loading
++ * indicator and previous/next-highlight controls cannot drift apart again.
++ * Only primary search-result highlights are navigated; the softer LLM trace
++ * overlay is intentionally excluded because it is explanatory rather than the
++ * passage the result was ranked on.
++ */
++internal const val MARKDOWN_PRIMARY_HIGHLIGHT_SELECTOR =
++    "mark.term-hit, span.term-hit, .semantic-passage-hit"
++internal const val HTML_PRIMARY_HIGHLIGHT_SELECTOR =
++    "mark.mv-hl, .mv-semantic-passage-hit"
++
++@Composable
++internal fun ArticleHighlightLoadingIndicator(
++    modifier: Modifier = Modifier
++) {
++    Surface(
++        modifier = modifier,
++        shape = RoundedCornerShape(18.dp),
++        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
++        contentColor = MaterialTheme.colorScheme.onSurface,
++        shadowElevation = 6.dp,
++        tonalElevation = 3.dp
++    ) {
++        Row(
++            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
++            verticalAlignment = Alignment.CenterVertically,
++            horizontalArrangement = Arrangement.Center
++        ) {
++            CircularProgressIndicator(
++                modifier = Modifier.size(17.dp),
++                strokeWidth = 2.dp
++            )
++            Spacer(Modifier.width(8.dp))
++            Text(
++                text = "Finding highlights…",
++                fontSize = 12.sp,
++                fontWeight = FontWeight.SemiBold
++            )
++        }
++    }
++}
++
++@Composable
++internal fun ArticleHighlightNavigationControls(
++    onPrevious: () -> Unit,
++    onNext: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    Surface(
++        modifier = modifier,
++        shape = RoundedCornerShape(18.dp),
++        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.96f),
++        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
++        shadowElevation = 7.dp,
++        tonalElevation = 3.dp
++    ) {
++        Row(
++            verticalAlignment = Alignment.CenterVertically,
++            horizontalArrangement = Arrangement.Center
++        ) {
++            IconButton(onClick = onPrevious, modifier = Modifier.size(46.dp)) {
++                Icon(
++                    Icons.Default.KeyboardArrowUp,
++                    contentDescription = "Previous highlighted passage"
++                )
++            }
++            IconButton(onClick = onNext, modifier = Modifier.size(46.dp)) {
++                Icon(
++                    Icons.Default.KeyboardArrowDown,
++                    contentDescription = "Next highlighted passage"
++                )
++            }
++        }
++    }
++}
++
++/** Returns the number of currently visible primary highlight targets. */
++internal fun articleHighlightCountJs(selector: String): String = """
++    (function(){
++      try {
++        var nodes=document.querySelectorAll(${jsQuoted(selector)}), count=0;
++        for(var i=0;i<nodes.length;i++){
++          var el=nodes[i];
++          if(!el || !el.isConnected) continue;
++          var cs=window.getComputedStyle?window.getComputedStyle(el):null;
++          if(cs && (cs.display==='none' || cs.visibility==='hidden')) continue;
++          var r=el.getBoundingClientRect();
++          if(r.width<=0 && r.height<=0) continue;
++          count++;
++        }
++        if(count<=0) window.__mvHighlightNavIndex=-1;
++        else if(typeof window.__mvHighlightNavIndex!=='number' ||
++                window.__mvHighlightNavIndex<0 ||
++                window.__mvHighlightNavIndex>=count) {
++          // All existing highlighters auto-scroll to the first primary match,
++          // so index zero is the correct starting point for arrow navigation.
++          window.__mvHighlightNavIndex=0;
++        }
++        return count;
++      } catch(e) { return 0; }
++    })()
++""".trimIndent()
++
++/**
++ * Jumps to the previous (-1) or next (+1) primary highlight and returns its
++ * zero-based index. The target list is rebuilt on every tap so semantic
++ * handoff/re-rendering cannot leave stale DOM references behind.
++ */
++internal fun articleHighlightJumpJs(selector: String, direction: Int): String {
++    val step = if (direction < 0) -1 else 1
++    return """
++        (function(){
++          try {
++            var raw=document.querySelectorAll(${jsQuoted(selector)}), nodes=[];
++            for(var i=0;i<raw.length;i++){
++              var el=raw[i];
++              if(!el || !el.isConnected) continue;
++              var cs=window.getComputedStyle?window.getComputedStyle(el):null;
++              if(cs && (cs.display==='none' || cs.visibility==='hidden')) continue;
++              var r=el.getBoundingClientRect();
++              if(r.width<=0 && r.height<=0) continue;
++              nodes.push(el);
++            }
++            if(!nodes.length){window.__mvHighlightNavIndex=-1;return -1;}
++            var idx=window.__mvHighlightNavIndex;
++            if(typeof idx!=='number' || idx<0 || idx>=nodes.length) idx=0;
++            idx=(idx+($step)+nodes.length)%nodes.length;
++            window.__mvHighlightNavIndex=idx;
++            var target=nodes[idx];
++            try{target.scrollIntoView({behavior:'smooth',block:'center'});}
++            catch(e){try{target.scrollIntoView();}catch(_){}}
++            // Brief outline gives feedback without changing/removing the
++            // highlighter's own classes or risking the v5.5.18 handoff fix.
++            var oldOutline=target.style.outline;
++            var oldOffset=target.style.outlineOffset;
++            target.style.outline='2px solid currentColor';
++            target.style.outlineOffset='3px';
++            setTimeout(function(){
++              try{target.style.outline=oldOutline;target.style.outlineOffset=oldOffset;}catch(_){}
++            },650);
++            return idx;
++          } catch(e) { return -1; }
++        })()
++    """.trimIndent()
++}
++
++internal fun parseJavascriptInt(raw: String?): Int =
++    raw?.trim()?.removeSurrounding("\"")?.toIntOrNull() ?: 0
++
++private fun jsQuoted(value: String): String =
++    org.json.JSONObject.quote(value)
