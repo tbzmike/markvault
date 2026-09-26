@@ -1,0 +1,306 @@
+diff -ruN mv_5518/app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt mv_5519/app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt
+--- mv_5518/app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt	2026-09-26 01:35:33.000000000 +0000
++++ mv_5519/app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt	2026-09-26 03:23:14.727905241 +0000
+@@ -176,14 +176,57 @@
+     var lastHtmlScrollValue by remember { mutableStateOf(0) }
+     var toolbarVisibilityChangedAt by remember { mutableStateOf(0L) }
+     var retainedHighlight by remember(id) { mutableStateOf<AppViewModel.PendingHighlight?>(null) }
++    // v5.5.19 — Explicit search-result highlight lifecycle for offline HTML.
++    // The loading chip remains visible while semantic/lexical highlighting is
++    // still resolving, and navigation controls are enabled only after the DOM
++    // confirms at least one real primary highlight target.
++    var highlightLoading by remember(id) { mutableStateOf(false) }
++    var highlightMatchCount by remember(id) { mutableStateOf(0) }
+     val enableFullscreenMode by vm.enableFullscreenMode.collectAsStateWithLifecycle()
+     var initialScrollToApply by remember { mutableStateOf<Int?>(null) }
+     var scrollRestored by remember { mutableStateOf(false) }
+ 
++    fun settleHtmlHighlightUi(view: WebView, attempt: Int = 0) {
++        view.evaluateJavascript(
++            articleHighlightCountJs(HTML_PRIMARY_HIGHLIGHT_SELECTOR)
++        ) { rawCount ->
++            if (webViewRef !== view) return@evaluateJavascript
++            val count = parseJavascriptInt(rawCount).coerceAtLeast(0)
++            if (count > 0) {
++                highlightMatchCount = count
++                highlightLoading = false
++            } else if (attempt < 2) {
++                // buildHighlightJs has guarded retries at ~400 ms and ~1900 ms
++                // for dynamic/offline pages. Poll just after those windows so
++                // the loading indicator reflects the real DOM outcome rather
++                // than the evaluateJavascript call returning too early.
++                val delayMs = if (attempt == 0) 500L else 1650L
++                view.postDelayed({ settleHtmlHighlightUi(view, attempt + 1) }, delayMs)
++            } else {
++                highlightMatchCount = 0
++                highlightLoading = false
++            }
++        }
++    }
++
+     LaunchedEffect(id) {
++        // Capture the one-shot highlight as soon as this reader is entered so
++        // the user sees the loading indicator during document load as well as
++        // during the later semantic pass. onPageFinished still accepts a late
++        // incoming value to preserve the old navigation contract.
++        vm.consumePendingHighlight()?.takeIf { it.query.isNotBlank() }?.let { pending ->
++            retainedHighlight = pending
++            if (vm.articleHighlightEnabled.value) {
++                highlightLoading = true
++                highlightMatchCount = 0
++            }
++        }
++
+         val note = withContext(Dispatchers.IO) { vm.loadNote(id) }
+         if (note == null) {
+             loadError = "Could not load the file from the library."
++            highlightLoading = false
++            highlightMatchCount = 0
+             return@LaunchedEffect
+         }
+         title = note.title.ifBlank { note.name }
+@@ -206,6 +249,8 @@
+         }
+         if (bytes == null) {
+             loadError = "Could not read the file. The library folder may have been moved."
++            highlightLoading = false
++            highlightMatchCount = 0
+             return@LaunchedEffect
+         }
+ 
+@@ -218,6 +263,8 @@
+             }
+             if (parsed == null) {
+                 loadError = "This MHTML file is malformed. Try opening it externally."
++                highlightLoading = false
++                highlightMatchCount = 0
+                 return@LaunchedEffect
+             }
+             htmlContent = parsed
+@@ -631,7 +678,13 @@
+                                     // v5.4.10 — pendingHighlight is now a
+                                     // data class with the exact-phrase flag.
+                                     val incomingHighlight = vm.consumePendingHighlight()
+-                                    if (incomingHighlight != null) retainedHighlight = incomingHighlight
++                                    if (incomingHighlight != null) {
++                                        retainedHighlight = incomingHighlight
++                                        if (vm.articleHighlightEnabled.value) {
++                                            highlightLoading = true
++                                            highlightMatchCount = 0
++                                        }
++                                    }
+                                     val pending = incomingHighlight ?: retainedHighlight
+                                     val popupQuery = vm.consumePendingPopupQuery()
+                                         ?.trim()?.removeSurrounding("\"")?.trim()
+@@ -642,6 +695,8 @@
+                                     }
+                                     if (pending != null && pending.query.isNotBlank() &&
+                                         view != null && highlightOn) {
++                                        highlightLoading = true
++                                        highlightMatchCount = 0
+                                         val hlMode = vm.effectiveHighlightMode()
+                                         // v5.5.18 — Smart + Semantic has one primary
+                                         // highlight owner. Do not auto-scroll to a provisional
+@@ -677,6 +732,7 @@
+                                                     }
+                                                 }
+                                             }
++                                            if (!semanticPrimary) settleHtmlHighlightUi(view)
+                                         }
+                                         // v5.5.16 — Auto/Smart + semantic search must use
+                                         // semantic sentence highlighting even when the lexical pass
+@@ -684,42 +740,74 @@
+                                         // gate is removed; semantic passages replace lexical marks only
+                                         // when a real semantic sentence is available. Keyword mode is
+                                         // deliberately excluded, preserving the user's explicit choice.
+-                                        if (hlMode == "smart" && vm.semanticEnabled.value) {
++                                        if (semanticPrimary) {
+                                             val semanticFallbackQuery = pending.query
+                                             val semanticFallbackText = noteContentForSemantic ?: htmlContent.orEmpty()
+                                             view.postDelayed({
+-                                                if (vm.articleHighlightEnabled.value &&
+-                                                    vm.effectiveHighlightMode() == "smart" && vm.semanticEnabled.value) {
+-                                                    htmlScope.launch {
+-                                                        val passages = vm.findArticleSemanticHighlightSentences(
++                                                if (webViewRef !== view) return@postDelayed
++
++                                                if (!vm.articleHighlightEnabled.value) {
++                                                    highlightLoading = false
++                                                    highlightMatchCount = 0
++                                                    return@postDelayed
++                                                }
++                                                if (vm.effectiveHighlightMode() != "smart" || !vm.semanticEnabled.value) {
++                                                    val fallbackMode = vm.effectiveHighlightMode()
++                                                    view.evaluateJavascript(
++                                                        buildHighlightJs(
++                                                            pending.query, fallbackMode,
++                                                            pending.isPhrase, pending.snippet
++                                                        )
++                                                    ) { settleHtmlHighlightUi(view) }
++                                                    return@postDelayed
++                                                }
++
++                                                htmlScope.launch {
++                                                    val passages = runCatching {
++                                                        vm.findArticleSemanticHighlightSentences(
+                                                             semanticFallbackText, semanticFallbackQuery
+                                                         )
+-                                                        if (passages.isNotEmpty() && vm.effectiveHighlightMode() == "smart") {
+-                                                            view.evaluateJavascript(
+-                                                                buildSemanticHighlightJs(passages)
+-                                                            ) { applied ->
+-                                                                if (applied != "true" &&
+-                                                                    vm.effectiveHighlightMode() == "smart") {
++                                                    }.getOrDefault(emptyList())
++
++                                                    if (webViewRef !== view) return@launch
++                                                    if (!vm.articleHighlightEnabled.value) {
++                                                        highlightLoading = false
++                                                        highlightMatchCount = 0
++                                                        return@launch
++                                                    }
++
++                                                    if (passages.isNotEmpty() &&
++                                                        vm.effectiveHighlightMode() == "smart" &&
++                                                        vm.semanticEnabled.value) {
++                                                        view.evaluateJavascript(
++                                                            buildSemanticHighlightJs(passages)
++                                                        ) { applied ->
++                                                            if (webViewRef === view) {
++                                                                // Preserve v5.5.18's transactional semantic
++                                                                // handoff: a failed DOM mapping cannot erase a
++                                                                // valid primary highlight. Only settle after a
++                                                                // successful semantic map or lexical fallback.
++                                                                if (applied == "true") {
++                                                                    settleHtmlHighlightUi(view)
++                                                                } else {
++                                                                    val fallbackMode = vm.effectiveHighlightMode()
+                                                                     view.evaluateJavascript(
+                                                                         buildHighlightJs(
+-                                                                            pending.query, hlMode,
++                                                                            pending.query, fallbackMode,
+                                                                             pending.isPhrase, pending.snippet
+-                                                                        ),
+-                                                                        null
+-                                                                    )
++                                                                        )
++                                                                    ) { settleHtmlHighlightUi(view) }
+                                                                 }
+                                                             }
+-                                                        } else if (vm.effectiveHighlightMode() == "smart") {
+-                                                            // v5.5.18 — No semantic passage was produced;
+-                                                            // retain the guaranteed lexical fallback instead of
+-                                                            // leaving a highly ranked article unhighlighted.
+-                                                            view.evaluateJavascript(
+-                                                                buildHighlightJs(
+-                                                                    pending.query, hlMode,
+-                                                                    pending.isPhrase, pending.snippet
+-                                                                ), null
+-                                                            )
+                                                         }
++                                                    } else {
++                                                        val fallbackMode = vm.effectiveHighlightMode()
++                                                        view.evaluateJavascript(
++                                                            buildHighlightJs(
++                                                                pending.query, fallbackMode,
++                                                                pending.isPhrase, pending.snippet
++                                                            )
++                                                        ) { settleHtmlHighlightUi(view) }
+                                                     }
+                                                 }
+                                             }, 80L)
+@@ -737,12 +825,20 @@
+                                                 null
+                                             )
+                                         }
+-                                    } else if (popupQuery != null) {
+-                                        // Highlighting can be disabled by the user or a
+-                                        // document may not produce marks. The explicit
+-                                        // semantic action must still open its popup.
+-                                        val articleText = noteContentForSemantic ?: htmlContent.orEmpty()
+-                                        vm.findAndShowArticlePassages(id, articleText, popupQuery)
++                                    } else {
++                                        // No primary search-result highlight is going to run
++                                        // for this page load (disabled, absent, blank, or no
++                                        // live WebView). End the loading lifecycle explicitly
++                                        // so the chip can never remain stuck indefinitely.
++                                        highlightLoading = false
++                                        highlightMatchCount = 0
++                                        if (popupQuery != null) {
++                                            // Highlighting can be disabled by the user or a
++                                            // document may not produce marks. The explicit
++                                            // semantic action must still open its popup.
++                                            val articleText = noteContentForSemantic ?: htmlContent.orEmpty()
++                                            vm.findAndShowArticlePassages(id, articleText, popupQuery)
++                                        }
+                                     }
+                                     // v5.4.182cc — Inject scripture detection JS
+                                     // after all other injections so it runs on the
+@@ -910,19 +1006,57 @@
+                 )
+             }
+ 
+-            // v5.4.181cc — "Jump to top", same pattern as ReaderScreen's
+-            // markdown reader (reuses the existing webViewRef + latestScroll
+-            // already set up for the v5.4.155cc scroll-to-hide work — no
+-            // new capture logic needed). Instant jump via the plain View
+-            // scrollTo(0,0) method.
+-            if (latestScroll.value > 400) {
+-                AnimatedJumpToTop(
+-                    onClick = { webViewRef?.scrollTo(0, 0) },
++            // v5.5.19 — Show a transient status while the search-result
++            // highlighter is still resolving. This is driven by the same DOM
++            // confirmation lifecycle as the arrows below, so it cannot claim
++            // completion before a real primary highlight exists (or all guarded
++            // attempts have safely failed).
++            if (highlightLoading) {
++                ArticleHighlightLoadingIndicator(
+                     modifier = Modifier
+-                        .align(Alignment.BottomCenter)
+-                        .padding(bottom = 82.dp)
++                        .align(Alignment.TopCenter)
++                        .padding(top = 10.dp)
+                 )
+             }
++
++            // v5.5.19 — Keep highlight navigation directly BELOW the existing
++            // animated jump-to-top finger. The arrows exist only after the DOM
++            // confirms at least one primary highlight. Rebuilding the DOM target
++            // list on every tap keeps navigation valid after semantic handoff or
++            // a page re-render.
++            if (latestScroll.value > 400 || (!highlightLoading && highlightMatchCount > 0)) {
++                Column(
++                    modifier = Modifier
++                        .align(Alignment.BottomCenter)
++                        .padding(bottom = 82.dp),
++                    horizontalAlignment = Alignment.CenterHorizontally
++                ) {
++                    if (latestScroll.value > 400) {
++                        AnimatedJumpToTop(
++                            onClick = { webViewRef?.scrollTo(0, 0) }
++                        )
++                    }
++                    if (!highlightLoading && highlightMatchCount > 0) {
++                        if (latestScroll.value > 400) Spacer(Modifier.height(6.dp))
++                        ArticleHighlightNavigationControls(
++                            onPrevious = {
++                                webViewRef?.evaluateJavascript(
++                                    articleHighlightJumpJs(
++                                        HTML_PRIMARY_HIGHLIGHT_SELECTOR, -1
++                                    ), null
++                                )
++                            },
++                            onNext = {
++                                webViewRef?.evaluateJavascript(
++                                    articleHighlightJumpJs(
++                                        HTML_PRIMARY_HIGHLIGHT_SELECTOR, 1
++                                    ), null
++                                )
++                            }
++                        )
++                    }
++                }
++            }
+         }
+ 
+         // Bottom toolbar — hidden when toolbars scroll-hidden (v5.4.155cc)
