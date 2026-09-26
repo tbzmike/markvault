@@ -1,0 +1,14 @@
+diff -ruN mv_5518/app/build.gradle.kts mv_5519/app/build.gradle.kts
+--- mv_5518/app/build.gradle.kts	2026-09-26 01:34:49.000000000 +0000
++++ mv_5519/app/build.gradle.kts	2026-09-26 03:17:40.612144111 +0000
+@@ -13,8 +13,8 @@
+         applicationId = "com.tebogo.markvault"
+         minSdk = 26
+         targetSdk = 35
+-        versionCode = 467
+-        versionName = "5.5.18"
++        versionCode = 468
++        versionName = "5.5.19"
+     }
+ 
+     signingConfigs {
