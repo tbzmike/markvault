@@ -1,52 +1,120 @@
-name: Build MarkVault APK
+name: Build MarkVault 5.5.22 APK
 
 on:
   push:
     paths:
-      - "source.zip"
       - ".github/workflows/build.yml"
-  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Get the code
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Unzip project
+      - name: Unzip exact 5.5.20 source
         run: unzip -o -q source.zip -d project
 
-      - name: Build APK
+      - name: Apply exact 5.5.22 contrast patch
+        shell: bash
+        run: |
+          cat > /tmp/p.gz.b64 <<'B64'
+          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
+          5tYlt9CFlot8y0Xacn/2/7cobjXXTQAA
+          B64
+          base64 -d /tmp/p.gz.b64 > /tmp/p.gz
+          gzip -dc /tmp/p.gz | patch -p1 -d project
+
+      - name: Verify patched source
+        run: |
+          grep -n "versionCode\|versionName" project/app/build.gradle.kts
+          node --check project/app/src/main/assets/render.js
+          grep -n "mark:not(.term-hit):not(.llm-hit)" project/app/src/main/java/com/tebogo/markvault/ui/ThemeBridge.kt
+          grep -n "mv-highlight-contrast-style" project/app/src/main/java/com/tebogo/markvault/ui/HtmlReaderScreen.kt | head -1
+
+      - name: Build release APK
         run: cd project && gradle assembleRelease --no-daemon
 
-      - name: Collect APK
-        run: cp project/app/build/outputs/apk/release/app-release.apk MarkVault.apk
+      - name: Collect deliverables
+        run: |
+          cp project/app/build/outputs/apk/release/app-release.apk MarkVault-5.5.22.apk
+          cd project && zip -qr ../source-5.5.22.zip .
 
-      - name: Upload APK (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: MarkVault-APK
-          path: MarkVault.apk
-
-      - name: Publish APK to Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "MarkVault — latest APK"
-          body: "Fresh MarkVault build. Download MarkVault.apk below and install it."
-          files: MarkVault.apk
+          name: MarkVault-5.5.22
+          path: |
+            MarkVault-5.5.22.apk
+            source-5.5.22.zip
